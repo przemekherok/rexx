@@ -1,0 +1,177 @@
+/* REXX  - GENUPD: generuje SQL UPDATE z pliku tabelarycznego
+   Wejście:  DD INFILE  –  1. wiersz: nagłówki kolumn, kolejne: wartości
+   Wyjście:  DD OUTFILE –  SQL UPDATE (po jednym na każdy wiersz)
+   Użycie:   TSO EXEC 'HLQ.REXX(GENUPD)' 'MYSCHEMA.MYTABLE [KEYCOL] [DELIM]'
+             gdzie:
+               - MYSCHEMA.MYTABLE  – nazwa tabeli (wymagane)
+               - KEYCOL            – nazwa kolumny klucza (opcjonalnie; domyślnie 1. kolumna)
+               - DELIM             – przecinek/średnik/pipe/TAB/SPC (opcjonalnie, zwykle autodetect)
+*/
+
+parse upper arg TABLENAME KEYCOL DELIM .
+if TABLENAME = '' then do
+  say 'ERROR: Podaj nazwę tabeli jako pierwszy argument, np. MYSCHEMA.MYTABLE'
+  exit 8
+end
+
+/* Wczytaj cały INFILE do stem in. */
+"EXECIO * DISKR INFILE (FINIS STEM in.)"
+if rc <> 0 then do
+  say 'ERROR: Nie mogę czytać DD INFILE. RC='rc
+  exit 12
+end
+if in.0 = 0 then do
+  say 'ERROR: INFILE jest pusty.'
+  exit 12
+end
+
+/* Pomocnicze funkcje */
+sqlQuote: procedure
+  parse arg v
+  v = strip(v)
+  if v = '' then return 'NULL'
+  if translate(v) = 'NULL' then return 'NULL'
+  /* liczba (całkowita lub zmiennoprzecinkowa, z opcjonalnym znakiem) */
+  if datatype(v,'NUM') = 1 then return v
+  /* YYYY-MM-DD lub YYYY-MM-DD hh:mm:ss -> potraktuj jak tekst (bez rozpoznawania typów DB) */
+  v = changestr("'", v, "''")         /* escape pojedynczych apostrofów */
+  return ''''v''''
+return
+
+/* Zamień wszystkie wystąpienia old na new (prosty odpowiednik CHANGESTR dla kompat.) */
+changestr: procedure
+  parse arg old, s, new
+  if old = '' then return s
+  do forever
+    p = pos(old, s)
+    if p = 0 then leave
+    s = delstr(s, p, length(old))
+    s = insert(new, s, p-1)
+  end
+  return s
+
+/* Rozpoznaj separator w linii nagłówka, jeśli nie podano */
+detectDelim: procedure
+  parse arg hdr
+  /* liczba wystąpień potencjalnych separatorów */
+  dlist = ',;|9B'  /* 9=TAB, B=SPACE (hex) – specjalne oznaczenia */
+  best = ' '
+  bestcnt = -1
+  do i = 1 to length(dlist)
+    d = substr(dlist,i,1)
+    select
+      when d = '9' then sep = d2c(9)     /* TAB */
+      when d = 'B' then sep = d2c(32)    /* SPACE */
+      otherwise        sep = d
+    end
+    cnt = 0
+    p = 1
+    do while pos(sep, hdr, p) > 0
+      p = pos(sep, hdr, p) + 1
+      cnt = cnt + 1
+    end
+    if cnt > bestcnt then do
+      best = sep
+      bestcnt = cnt
+    end
+  end
+  return best
+
+/* Rozbij linię po separatorze do stemu arr. ; zwróć liczbę elementów */
+splitLine: procedure
+  parse arg line, sep, stem.
+  stem.0 = 0
+  line = strip(line)
+  if line = '' then return 0
+  parse var sep .
+  if sep = '' then sep = ' '           /* safety */
+  tmp = line
+  i = 0
+  do while tmp <> ''
+    if sep = ' ' then do
+      /* separatory białe – ściśnij wielokrotne spacje/taby */
+      parse var tmp fld tmp
+    end
+    else do
+      parse var tmp fld (sep) tmp
+    end
+    i = i + 1
+    stem.i = strip(fld)
+    /* Jeżeli brak kolejnego separatora, cały ogon w stem i i koniec */
+    if sep <> ' ' & pos(sep,tmp) = 0 then do
+      if tmp <> '' then do
+        i = i + 1
+        stem.i = strip(tmp)
+        tmp = ''
+      end
+    end
+  end
+  stem.0 = i
+  return i
+
+/* --- START --- */
+hdr = strip(in.1)
+if DELIM = '' then DELIM = detectDelim(hdr)
+
+cols. = ''
+call splitLine hdr, DELIM, cols.
+if cols.0 = 0 then do
+  say 'ERROR: Nie wykryto kolumn w nagłówku.'
+  exit 16
+end
+
+/* Jeśli nie podano kolumny klucza – użyj pierwszej */
+if KEYCOL = '' then KEYCOL = cols.1
+
+/* Znajdź indeks kolumny klucza */
+keyIdx = 0
+do i = 1 to cols.0
+  if translate(cols.i) = translate(KEYCOL) then keyIdx = i
+end
+if keyIdx = 0 then do
+  say 'ERROR: Kolumna klucza "'KEYCOL'" nie istnieje w nagłówku.'
+  exit 20
+end
+
+out. = ''
+out.0 = 0
+
+do r = 2 to in.0
+  line = strip(in.r)
+  if line = '' then iterate
+  /* Rozbij wartości */
+  vals. = ''
+  call splitLine line, DELIM, vals.
+
+  /* Jeżeli mniej wartości niż kolumn – dopaduj pustymi; jeśli więcej – przytnij */
+  if vals.0 < cols.0 then do i = vals.0+1 to cols.0; vals.i = ''; end
+  if vals.0 > cols.0 then vals.0 = cols.0
+
+  /* Zbuduj listę SET (bez kolumny klucza) */
+  setlist = ''
+  do i = 1 to cols.0
+    if i = keyIdx then iterate
+    setfrag = cols.i || ' = ' || sqlQuote(vals.i)
+    if setlist = '' then setlist = setfrag
+    else setlist = setlist || ', ' || setfrag
+  end
+
+  /* WHERE po kluczu (używamy wartości z wiersza) */
+  where = KEYCOL || ' = ' || sqlQuote(vals.keyIdx)
+
+  stmt = 'UPDATE ' || TABLENAME || ' SET ' || setlist || ' WHERE ' || where || ';'
+  out.0 = out.0 + 1
+  out.out.0 = stmt
+  out.r = stmt
+end
+
+/* Zapisz do OUTFILE */
+"EXECIO "out.0" DISKW OUTFILE (FINIS STEM out.)"
+if rc <> 0 then do
+  say 'ERROR: Nie mogę pisać do DD OUTFILE. RC='rc
+  exit 24
+end
+
+/* Echo na SYSOUT dla wygody */
+say 'Wygenerowano 'out.0' instrukcji UPDATE do DD OUTFILE.'
+exit 0
