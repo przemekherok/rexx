@@ -1,76 +1,4 @@
-/* REXX  - GENUPD80: UPDATE -> dataset RECFM=FB LRECL=80 + pytanie o klucz(e)
-   Wejście:  DD INFILE  – 1. wiersz: nagłówki; kolejne: dane
-   Wyjście:  OUTDSN(...) – dataset sekwencyjny z rekordami 80
-*/
-parse upper arg TABLENAME DELIM rest
-if TABLENAME = '' then do
-  say 'ERROR: Podaj nazwe tabeli, np. MYSCHEMA.MYTABLE'
-  exit 8
-end
-
-/* OUTDSN(...) z argumentów */
-outdsn = ''
-if rest <> '' then do
-  parse upper var rest pre 'OUTDSN(' outdsn ')' post
-end
-if outdsn = '' then do
-  say 'ERROR: Podaj OUTDSN(HLQ.DATASET.NAME)'
-  exit 8
-end
-
-address TSO
-
-/* Wczytaj INFILE */
-"EXECIO * DISKR INFILE (FINIS STEM in.)"
-if rc <> 0 then do
-  say 'ERROR: Nie moge czytac DD INFILE. RC='rc
-  exit 12
-end
-if in.0 = 0 then do
-  say 'ERROR: INFILE jest pusty.'
-  exit 12
-end
-
-/* ---------- Pomocnicze ---------- */
-sqlQuote: procedure
-  parse arg v
-  v = strip(v)
-  if v = '' then return 'NULL'
-  if translate(v) = 'NULL' then return 'NULL'
-  if datatype(v,'NUM') = 1 then return v
-  v = changestr("'", v, "''")
-  return ''''v''''
-return
-
-changestr: procedure
-  parse arg old, s, new
-  if old='' then return s
-  do forever
-    p = pos(old,s); if p=0 then leave
-    s = delstr(s,p,length(old)); s = insert(new,s,p-1)
-  end
-  return s
-
-detectDelim: procedure
-  parse arg hdr
-  dlist = ',;|9B'      /* 9=TAB, B=SPACE */
-  best = ' '; bestcnt = -1
-  do i=1 to length(dlist)
-    d = substr(dlist,i,1)
-    select
-      when d='9' then sep=d2c(9)
-      when d='B' then sep=d2c(32)
-      otherwise     sep=d
-    end
-    cnt=0; p=1
-    do while pos(sep,hdr,p)>0
-      p = pos(sep,hdr,p)+1; cnt=cnt+1
-    end
-    if cnt>bestcnt then do; best=sep; bestcnt=cnt; end
-  end
-  return best
-
-splitLine: procedure
+splitLine:
   parse arg line, sep, stem.
   stem.0 = 0
   line = strip(line); if line='' then return 0
@@ -91,149 +19,23 @@ splitLine: procedure
       end
     end
   end
-  stem.0 = i
+  stem.0 = i + 0            /* wymuś wartość numeryczną */
   return i
 
-/* tnie tekst na rekordy 80 znaków i ładuje do out. */
-push80: procedure expose out. out.0
-  parse arg s
-  if s = '' then do; out.0 = out.0 + 1; out.out.0 = ''; return; end
-  do p = 1 to length(s) by 80
-    chunk = substr(s, p, 80)
-    out.0 = out.0 + 1
-    out.out.0 = chunk
-  end
-return
 
-/* ---------- Start ---------- */
 hdr = strip(in.1)
 if DELIM = '' then DELIM = detectDelim(hdr)
 
-/* Nagłówki */
 cols. = ''
 call splitLine hdr, DELIM, cols.
-if cols.0 = 0 then do
-  say 'ERROR: Nie wykryto kolumn w naglowku.'
+
+/* dla bezpieczeństwa używaj ncols */
+if datatype(cols.0,'W') <> 1 then do
+  say 'ERROR: cols.0 nienumeryczne: "'cols.0'".'
   exit 16
 end
+ncols = cols.0 + 0
 
-/* Pytanie o klucze (wielokrotne dozwolone) */
-say 'Podaj kolumny klucza (oddzielone przecinkami), ENTER = 1. kolumna.'
-say 'Przyklad: ID, BRANCH, EFF_DATE'
-parse pull keyin
-keyin = strip(keyin)
-
-keys. = ''; keycnt = 0
-if keyin = '' then do
-  keycnt = 1
-  keys.1 = cols.1
+do i = 1 to ncols
+  /* ... */
 end
-else do
-  /* rozbij po przecinkach / spacji; porównuj case-insensitive do nagłówka */
-  tmp = keyin
-  do forever
-    parse var tmp k ',' tmp
-    k = strip(k)
-    if k = '' then iterate
-    /* znajdź dokładną nazwę z nagłówka (zachowaj oryginalny case) */
-    found = 0
-    do i=1 to cols.0
-      if translate(cols.i) = translate(k) then do
-        /* uniknij duplikatów */
-        dupe = 0
-        do j=1 to keycnt
-          if translate(keys.j) = translate(cols.i) then dupe = 1
-        end
-        if dupe = 0 then do
-          keycnt = keycnt + 1
-          keys.keycnt = cols.i
-        end
-        found = 1
-        leave
-      end
-    end
-    if tmp = '' then leave
-  end
-
-  if keycnt = 0 then do
-    say 'ERROR: Nie rozpoznano zadnej kolumny klucza w: ' keyin
-    exit 20
-  end
-end
-
-/* Zamapuj indeksy kolumn klucza */
-kidx. = ''
-do j=1 to keycnt
-  kidx.j = 0
-  do i=1 to cols.0
-    if translate(cols.i) = translate(keys.j) then kidx.j = i
-  end
-  if kidx.j = 0 then do
-    say 'ERROR: Kolumna klucza "'keys.j'" nie istnieje w naglowku.'
-    exit 21
-  end
-end
-
-/* Generowanie SQL */
-out. = ''; out.0 = 0
-
-do r = 2 to in.0
-  line = strip(in.r)
-  if line = '' then iterate
-
-  vals. = ''
-  call splitLine line, DELIM, vals.
-  if vals.0 < cols.0 then do i=vals.0+1 to cols.0; vals.i=''; end
-  if vals.0 > cols.0 then vals.0 = cols.0
-
-  /* SET: wszystkie kolumny poza kluczami */
-  setlist = ''
-  do i=1 to cols.0
-    /* sprawdź czy i jest kluczem */
-    iskey = 0
-    do j=1 to keycnt
-      if i = kidx.j then do; iskey = 1; leave; end
-    end
-    if iskey then iterate
-
-    frag = cols.i || ' = ' || sqlQuote(vals.i)
-    if setlist = '' then setlist = frag
-    else setlist = setlist || ', ' || frag
-  end
-
-  /* WHERE: wszystkie klucze polaczone AND */
-  where = ''
-  do j=1 to keycnt
-    wi = kidx.j
-    wfrag = keys.j || ' = ' || sqlQuote(vals.wi)
-    if where = '' then where = wfrag
-    else where = where || ' AND ' || wfrag
-  end
-
-  stmt  = 'UPDATE ' || TABLENAME || ' SET ' || setlist || ' WHERE ' || where || ';'
-  call push80 stmt
-end
-
-/* ALLOC wyjścia: RECFM=FB LRECL=80 */
-"FREE FI(OUTFILE)"
-"ALLOC FI(OUTFILE) DA('"outdsn"') NEW CATALOG",
-" SPACE(5,5) CYL DSORG(PS) RECFM(F B) LRECL(80) BLKSIZE(0)"
-if rc <> 0 then do
-  /* Jesli dataset istnieje – dopisz (MOD) */
-  "ALLOC FI(OUTFILE) DA('"outdsn"') MOD REUSE"
-  if rc <> 0 then do
-    say 'ERROR: ALLOC na OUTDSN nieudany. RC='rc
-    exit 24
-  end
-end
-
-"EXECIO "out.0" DISKW OUTFILE (FINIS STEM out.)"
-if rc <> 0 then do
-  say 'ERROR: Zapis do OUTDSN nieudany. RC='rc
-  "FREE FI(OUTFILE)"
-  exit 28
-end
-
-"FREE FI(OUTFILE)"
-say 'OK: Zapisano 'out.0' rekordow do 'outdsn'.'
-exit 0
