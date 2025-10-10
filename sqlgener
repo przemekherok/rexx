@@ -1,40 +1,46 @@
-splitLine:
-  parse arg line, sep, stem.
-  stem.0 = 0
-  line = strip(line); if line='' then return 0
-  tmp = line; i=0
-  if sep=' ' then do
-    do while tmp<>''
+splitLine: procedure
+  parse arg line, sep, stemname          /* np. 'cols.' */
+  line = strip(line)
+  call value stemname||'0', 0            /* cols.0 = 0 */
+  if line = '' then return 0
+
+  tmp = line; i = 0
+  if sep = ' ' then do
+    do while tmp <> ''
       parse var tmp fld tmp
-      i=i+1; stem.i = strip(fld)
+      i = i + 1
+      call value stemname||i, strip(fld) /* cols.i = ... */
     end
   end
   else do
     do forever
       parse var tmp fld (sep) tmp
-      i=i+1; stem.i = strip(fld)
-      if pos(sep,tmp)=0 then do
-        if tmp<>'' then do; i=i+1; stem.i=strip(tmp); end
+      i = i + 1
+      call value stemname||i, strip(fld)
+      if pos(sep,tmp) = 0 then do
+        if tmp <> '' then do
+          i = i + 1
+          call value stemname||i, strip(tmp)
+        end
         leave
       end
     end
   end
-  stem.0 = i + 0            /* wymuś wartość numeryczną */
-  return i
 
+  call value stemname||'0', i + 0        /* cols.0 = i (numerycznie) */
+  return i
 
 hdr = strip(in.1)
 if DELIM = '' then DELIM = detectDelim(hdr)
 
+/* Nagłówki */
 cols. = ''
-call splitLine hdr, DELIM, cols.
+ncols = splitLine(hdr, DELIM, 'cols.')    /* zwraca licznik */
 
-/* dla bezpieczeństwa używaj ncols */
-if datatype(cols.0,'W') <> 1 then do
-  say 'ERROR: cols.0 nienumeryczne: "'cols.0'".'
+if datatype(ncols,'W') <> 1 then do
+  say 'ERROR: ncols nienumeryczne.'
   exit 16
 end
-ncols = cols.0 + 0
 
 do i = 1 to ncols
   /* ... */
