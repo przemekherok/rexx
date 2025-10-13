@@ -1,47 +1,14 @@
-splitLine: procedure
-  parse arg line, sep, stemname          /* np. 'cols.' */
-  line = strip(line)
-  call value stemname||'0', 0            /* cols.0 = 0 */
-  if line = '' then return 0
-
-  tmp = line; i = 0
-  if sep = ' ' then do
-    do while tmp <> ''
-      parse var tmp fld tmp
-      i = i + 1
-      call value stemname||i, strip(fld) /* cols.i = ... */
-    end
-  end
-  else do
-    do forever
-      parse var tmp fld (sep) tmp
-      i = i + 1
-      call value stemname||i, strip(fld)
-      if pos(sep,tmp) = 0 then do
-        if tmp <> '' then do
-          i = i + 1
-          call value stemname||i, strip(tmp)
-        end
-        leave
-      end
-    end
-  end
-
-  call value stemname||'0', i + 0        /* cols.0 = i (numerycznie) */
-  return i
-
-hdr = strip(in.1)
-if DELIM = '' then DELIM = detectDelim(hdr)
-
-/* Nagłówki */
-cols. = ''
-ncols = splitLine(hdr, DELIM, 'cols.')    /* zwraca licznik */
-
-if datatype(ncols,'W') <> 1 then do
-  say 'ERROR: ncols nienumeryczne.'
-  exit 16
+if stmt = '' then do
+  out.0 = out.0 + 1
+  idx = out.0
+  out.idx = left('', 80)            /* 80 spacji */
 end
-
-do i = 1 to ncols
-  /* ... */
+else do
+  do p = 1 to length(stmt) by 80
+    chunk = substr(stmt, p, 80)     /* wytnij do 80 znaków */
+    chunk = left(chunk, 80)         /* dopaduj spacjami do LRECL=80 */
+    out.0 = out.0 + 1
+    idx = out.0
+    out.idx = chunk                 /* ZAPIS pod kolejnym NUMERYCZNYM indeksem */
+  end
 end
