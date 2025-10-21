@@ -1,13 +1,14 @@
-/* REXX - GENSQL: Generate INSERT/UPDATE from a data dataset into FB 80 dataset
-   - User prompts in Polish, code comments in English
-   - Works in TSO/ISPF. Helper routines are placed below MAIN and use PROCEDURE safely.
+/* REXX - GENSQL: Generate INSERT/UPDATE SQL statements from a data dataset
+   - All messages and prompts in English
+   - Robust delimiter detection and fallback logic
+   - Output: fixed 80-byte dataset <OUTBASE>.(INSERT|UPDATE)
 */
 address TSO "CLEAR"
 signal MAIN
 
-/* ===== Helper routines (called later) ===== */
+/* ===== Helper routines ===== */
 
-/* changestr(old, s, new): replace all occurrences of 'old' in 's' with 'new' */
+/* Replace all occurrences of 'old' in 's' with 'new' */
 changestr: procedure
   parse arg old, s, new
   if old = '' then return s
@@ -18,30 +19,27 @@ changestr: procedure
   end
   return s
 
-/* detectDelim(hdr): prefer non-space delimiters first, space as last resort */
+/* Detect delimiter: prefer ',', '|', ';', then TAB, finally space */
 detectDelim: procedure
   parse arg hdr
-  alist = '|,;9 B'              /* 9=TAB, B=SPACE */
-  best = d2c(32); bestcnt = -1
-  do i = 1 to words(alist)
-    a = word(alist, i)
-    select
-      when a = '9' then sep = d2c(9)
-      when a = 'B' then sep = d2c(32)
-      otherwise        sep = a
-    end
+  cand = ',|;'
+  best = ''; bestcnt = -1
+  do i = 1 to length(cand)
+    d = substr(cand, i, 1)
     cnt = 0; p = 1
-    do while pos(sep, hdr, p) > 0
-      p = pos(sep, hdr, p) + 1
+    do while pos(d, hdr, p) > 0
+      p = pos(d, hdr, p) + 1
       cnt = cnt + 1
     end
     if cnt > bestcnt then do
-      best = sep; bestcnt = cnt
+      best = d; bestcnt = cnt
     end
   end
-  return best
+  if bestcnt > 0 then return best
+  if pos(d2c(9), hdr) > 0 then return d2c(9)
+  return ' '
 
-/* splitLine(line, sep, 'stem.'): splits into a caller stem via VALUE(); returns field count */
+/* Split a string by a delimiter into a stem (e.g., 'cols.') */
 splitLine: procedure
   parse arg line, sep, stemname
   if stemname = '' then return 0
@@ -73,7 +71,7 @@ splitLine: procedure
   call value stemname||'0', i + 0
   return i
 
-/* sqlQuote(v): NULL/number passthrough; strings quoted and apostrophes doubled */
+/* Quote SQL values properly (NULL, numbers, strings with apostrophes) */
 sqlQuote: procedure
   parse arg v
   v = strip(v)
@@ -83,39 +81,36 @@ sqlQuote: procedure
   v = changestr("'", v, "''")
   return ''''v''''
 
-/* app(sss): append string to out. stem with wrapping/padding to 80 chars */
+/* Append text to out. stem with 80-character wrapping */
 app: procedure expose out. out.0
   parse arg sss
   if sss = '' then do
     out.0 = out.0 + 1
     idx = out.0
-    out.idx = left('', 80)                /* blank 80-char record */
+    out.idx = left('', 80)
     return
   end
   do p = 1 to length(sss) by 80
     chunk = substr(sss, p, 80)
-    chunk = left(chunk, 80)               /* pad to 80 (FB) */
+    chunk = left(chunk, 80)
     out.0 = out.0 + 1
     idx = out.0
     out.idx = chunk
   end
   return
 
-/* mkSetLine(col, val, islast) -> "  COL = VAL[ ,]" */
 mkSetLine: procedure
   parse arg col, val, islast
   line = '  ' || col || ' = ' || val
   if islast = 0 then line = line || ','
   return line
 
-/* mkColLine(col, islast) -> "  COL[ ,]" */
 mkColLine: procedure
   parse arg col, islast
   line = '  ' || col
   if islast = 0 then line = line || ','
   return line
 
-/* mkValLine(val, islast) -> "  VAL[ ,]" */
 mkValLine: procedure
   parse arg val, islast
   line = '  ' || val
@@ -126,83 +121,111 @@ mkValLine: procedure
 MAIN:
 
 say "==============================="
-say "   GENERATOR SQL (INSERT/UPDATE)"
+say "   SQL GENERATOR (INSERT/UPDATE)"
 say "==============================="
 say
 
-/* --- 1) Robust user input --- */
+/* --- 1) User input --- */
 do forever
-  say "Podaj nazwe tabeli (SCHEMA.TAB):"
+  say "Enter table name (SCHEMA.TABLE):"
   parse upper pull TABLENAME
   TABLENAME = strip(TABLENAME)
   if TABLENAME <> "" & pos('.', TABLENAME) > 0 then leave
-  say "ERROR: Podaj w formacie SCHEMA.TAB (np. MYSCHEMA.MYTABLE)."
+  say "ERROR: Use SCHEMA.TABLE format (e.g. MYSCHEMA.MYTABLE)."
 end
 
 do forever
-  say "Podaj DSN z danymi (wejscie), np. HLQ.INPUT.DATA:"
+  say "Enter input dataset name (e.g. HLQ.INPUT.DATA):"
   parse pull INDSN
   INDSN = strip(INDSN)
   if INDSN <> "" then leave
-  say "ERROR: DSN wejsciowy nie moze byc pusty."
+  say "ERROR: Input dataset cannot be empty."
 end
 
 do forever
-  say "Wybierz operacje (INSERT/UPDATE):"
+  say "Enter operation type (INSERT/UPDATE):"
   parse upper pull OP
   OP = strip(OP)
   if OP = "INSERT" | OP = "UPDATE" then leave
-  say "ERROR: Dozwolone tylko INSERT lub UPDATE."
+  say "ERROR: Only INSERT or UPDATE are supported."
 end
 
 KEYIN = ""
 if OP = "UPDATE" then do
-  say "Podaj kolumny klucza (nazwy lub indeksy, oddzielone , ; | lub spacjami)."
-  say "ENTER = 1. kolumna. Przyklad: ID, BRANCH, EFF_DATE lub 1,3"
+  say "Enter key columns (names or indexes separated by , ; | or spaces)."
+  say "Press ENTER for first column. Example: ID, BRANCH, EFF_DATE or 1,3"
   parse pull KEYIN
   KEYIN = strip(KEYIN)
 end
 
 do forever
-  say "Podaj BAZOWA nazwe DSN wyjsciowego (bez sufiksu), np. HLQ.OUTPUT.SQL:"
+  say "Enter base name for output dataset (without suffix), e.g. HLQ.OUTPUT.SQL:"
   parse pull OUTBASE
   OUTBASE = strip(OUTBASE)
   if OUTBASE <> "" then leave
-  say "ERROR: Bazowa nazwa DSN wyjsciowego nie moze byc pusta."
+  say "ERROR: Output base dataset cannot be empty."
 end
 
-OUTDSN = OUTBASE || '.' || OP      /* e.g. HLQ.OUTPUT.SQL.UPDATE */
+OUTDSN = OUTBASE || '.' || OP
 
 /* --- 2) Read input dataset --- */
 address TSO
 "FREE FI(INFILE)"
 "ALLOC FI(INFILE) DA('"INDSN"') SHR REUSE"
 if rc <> 0 then do
-  say "ERROR: Nie moge ALLOC INFILE na '"INDSN"'. RC="rc
+  say "ERROR: Cannot allocate input dataset '"INDSN"'. RC="rc
   exit 12
 end
 
 "EXECIO * DISKR INFILE (FINIS STEM in.)"
 if rc <> 0 then do
-  say "ERROR: Nie moge czytac INFILE. RC="rc
+  say "ERROR: Cannot read input dataset. RC="rc
   "FREE FI(INFILE)"
   exit 12
 end
 "FREE FI(INFILE)"
 if in.0 = 0 then do
-  say "ERROR: Plik wejsciowy jest pusty."
+  say "ERROR: Input file is empty."
   exit 12
 end
 
-/* --- 3) Parse header & delimiter --- */
+/* --- 3) Parse header & detect delimiter (with fallback) --- */
 hdr   = strip(in.1)
 DELIM = detectDelim(hdr)
 
 cols. = ''
 ncols = splitLine(hdr, DELIM, 'cols.')
+
 if ncols < 1 then do
-  say "ERROR: Nie wykryto kolumn w naglowku. Sprawdz separator."
-  exit 16
+  alts = '|,;'
+  ok = 0
+  do ai = 1 to length(alts)
+    tryd = substr(alts, ai, 1)
+    cols. = ''
+    ncols = splitLine(hdr, tryd, 'cols.')
+    if ncols >= 1 then do
+      DELIM = tryd
+      ok = 1
+      leave
+    end
+  end
+  if ok = 0 then do
+    say "ERROR: Could not detect columns in header. Check delimiter."
+    say "HEADER: " hdr
+    exit 16
+  end
+end
+
+if DELIM = ' ' then do
+  if pos('|', hdr) > 0 then DELIM = '|'
+  else if pos(',', hdr) > 0 then DELIM = ','
+  else if pos(';', hdr) > 0 then DELIM = ';'
+  cols. = ''
+  ncols = splitLine(hdr, DELIM, 'cols.')
+  if ncols < 1 then do
+    say "ERROR: Header could not be parsed even after delimiter correction."
+    exit 16
+  end
 end
 
 /* --- 4) Keys (for UPDATE) --- */
@@ -213,7 +236,7 @@ if OP = "UPDATE" then do
     keys.1 = cols.1
   end
   else do
-    kraw = translate(KEYIN, ',', ';|')               /* ; and | -> , */
+    kraw = translate(KEYIN, ',', ';|')
     kraw = changestr('"', kraw, '')
     kraw = changestr("'", kraw, '')
     do while pos('  ', kraw) > 0; kraw = changestr('  ', kraw, ' '); end
@@ -226,11 +249,11 @@ if OP = "UPDATE" then do
       parse var tmpk k ',' tmpk
       k = strip(k); if k = '' then iterate
       picked = ''
-      if datatype(k,'W') = 1 then do                  /* numeric index */
+      if datatype(k,'W') = 1 then do
         idx = k + 0
         if idx >= 1 & idx <= ncols then picked = cols.idx
       end
-      if picked = '' then do                           /* name match */
+      if picked = '' then do
         do i = 1 to ncols
           if translate(cols.i) = translate(k) then do
             picked = cols.i
@@ -252,7 +275,7 @@ if OP = "UPDATE" then do
     end
 
     if keycnt = 0 then do
-      say "ERROR: Nie rozpoznano zadnych kolumn klucza w: " KEYIN
+      say "ERROR: No key columns recognized in: " KEYIN
       exit 20
     end
   end
@@ -270,7 +293,7 @@ if OP = "UPDATE" then do
       end
     end
     if kidx.j = 0 then do
-      say 'ERROR: Kolumna klucza "'keys.j'" nie istnieje w naglowku.'
+      say 'ERROR: Key column "'keys.j'" not found in header.'
       exit 21
     end
   end
@@ -284,80 +307,4 @@ do r = 2 to in.0
   if line = '' then iterate
 
   vals. = ''
-  nvals = splitLine(line, DELIM, 'vals.')
-
-  /* align counts */
-  if nvals < ncols then do i = nvals+1 to ncols; vals.i = ''; end
-  if nvals > ncols then nvals = ncols
-
-  if OP = "UPDATE" then do
-    call app 'UPDATE ' || TABLENAME
-    call app 'SET'
-    /* emit non-key columns with commas, last one without */
-    do i = 1 to ncols
-      iskey = 0
-      do j = 1 to keycnt
-        if i = kidx.j then do; iskey = 1; leave; end
-      end
-      if iskey then iterate
-
-      /* is this the last non-key column? count remaining non-keys */
-      leftcnt = 0
-      do t = i to ncols
-        isk = 0
-        do j = 1 to keycnt
-          if t = kidx.j then do; isk = 1; leave; end
-        end
-        if isk = 0 then leftcnt = leftcnt + 1
-      end
-      islast = (leftcnt = 1)
-
-      call app mkSetLine(cols.i, sqlQuote(vals.i), islast)
-    end
-
-    call app 'WHERE'
-    do j = 1 to keycnt
-      wi = kidx.j
-      wfrag = '  ' || keys.j || ' = ' || sqlQuote(vals.wi)
-      if j < keycnt then wfrag = wfrag || ' AND'
-      call app wfrag
-    end
-    call app ';'
-    call app ''
-  end
-  else do  /* INSERT */
-    call app 'INSERT INTO ' || TABLENAME || ' ('
-    do i = 1 to ncols
-      call app mkColLine(cols.i, i = ncols)
-    end
-    call app ')'
-    call app 'VALUES ('
-    do i = 1 to ncols
-      call app mkValLine(sqlQuote(vals.i), i = ncols)
-    end
-    call app ');'
-    call app ''
-  end
-end
-
-/* --- 6) Write OUTDSN as FB 80 --- */
-"FREE FI(OUTFILE)"
-"ALLOC FI(OUTFILE) DA('"OUTDSN"') NEW CATALOG SPACE(5,5) CYL DSORG(PS) RECFM(F B) LRECL(80) BLKSIZE(0)"
-if rc <> 0 then do
-  "ALLOC FI(OUTFILE) DA('"OUTDSN"') MOD REUSE"
-  if rc <> 0 then do
-    say "ERROR: ALLOC OUTFILE '"OUTDSN"' nie powiodl sie. RC="rc
-    exit 24
-  end
-end
-
-"EXECIO "out.0" DISKW OUTFILE (FINIS STEM out.)"
-if rc <> 0 then do
-  say "ERROR: Zapis do OUTDSN nieudany. RC="rc
-  "FREE FI(OUTFILE)"
-  exit 28
-end
-"FREE FI(OUTFILE)"
-
-say "OK: Zapisano "out.0" rekordow do "OUTDSN"."
-exit 0
+  nval
