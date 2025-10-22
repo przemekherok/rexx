@@ -1,6 +1,6 @@
 /* REXX - GENSQL: Generate INSERT/UPDATE SQL statements from a data dataset
    - All messages and prompts in English
-   - Robust delimiter detection and fallback logic
+   - Robust delimiter detection and per-row fallback
    - Output: fixed 80-byte dataset <OUTBASE>.(INSERT|UPDATE)
 */
 address TSO "CLEAR"
@@ -13,9 +13,10 @@ changestr: procedure
   parse arg old, s, new
   if old = '' then return s
   do forever
-    p = pos(old, s); if p = 0 then leave
+    p = pos(old, s)
+    if p = 0 then leave
     s = delstr(s, p, length(old))
-    s = insert(new, s, p-1)
+    s = insert(new, s, p - 1)
   end
   return s
 
@@ -23,16 +24,19 @@ changestr: procedure
 detectDelim: procedure
   parse arg hdr
   cand = ',|;'
-  best = ''; bestcnt = -1
+  best = ''
+  bestcnt = -1
   do i = 1 to length(cand)
     d = substr(cand, i, 1)
-    cnt = 0; p = 1
+    cnt = 0
+    p = 1
     do while pos(d, hdr, p) > 0
       p = pos(d, hdr, p) + 1
       cnt = cnt + 1
     end
     if cnt > bestcnt then do
-      best = d; bestcnt = cnt
+      best = d
+      bestcnt = cnt
     end
   end
   if bestcnt > 0 then return best
@@ -44,31 +48,34 @@ splitLine: procedure
   parse arg line, sep, stemname
   if stemname = '' then return 0
   line = strip(line)
-  call value stemname||'0', 0
+  call value stemname || '0', 0
   if line = '' then return 0
-  tmp = line; i = 0
+  tmp = line
+  i = 0
   if sep = ' ' then do
+    /* whitespace-separated tokens */
     do while tmp <> ''
       parse var tmp fld tmp
       i = i + 1
-      call value stemname||i, strip(fld)
+      call value stemname || i, strip(fld)
     end
   end
   else do
+    /* explicit delimiter */
     do forever
       parse var tmp fld (sep) tmp
       i = i + 1
-      call value stemname||i, strip(fld)
+      call value stemname || i, strip(fld)
       if pos(sep, tmp) = 0 then do
         if tmp <> '' then do
           i = i + 1
-          call value stemname||i, strip(tmp)
+          call value stemname || i, strip(tmp)
         end
         leave
       end
     end
   end
-  call value stemname||'0', i + 0
+  call value stemname || '0', i + 0
   return i
 
 /* Quote SQL values properly (NULL, numbers, strings with apostrophes) */
@@ -77,7 +84,7 @@ sqlQuote: procedure
   v = strip(v)
   if v = '' then return 'NULL'
   if translate(v) = 'NULL' then return 'NULL'
-  if datatype(v,'NUM') = 1 then return v
+  if datatype(v, 'NUM') = 1 then return v
   v = changestr("'", v, "''")
   return ''''v''''
 
@@ -130,7 +137,9 @@ do forever
   say "Enter table name (SCHEMA.TABLE):"
   parse upper pull TABLENAME
   TABLENAME = strip(TABLENAME)
-  if TABLENAME <> "" & pos('.', TABLENAME) > 0 then leave
+  if TABLENAME <> "" then do
+    if pos('.', TABLENAME) > 0 then leave
+  end
   say "ERROR: Use SCHEMA.TABLE format (e.g. MYSCHEMA.MYTABLE)."
 end
 
@@ -152,8 +161,8 @@ end
 
 KEYIN = ""
 if OP = "UPDATE" then do
-  say "Enter key columns (names or indexes separated by , ; | or spaces)."
-  say "Press ENTER for first column. Example: ID, BRANCH, EFF_DATE or 1,3"
+  say "Enter key columns (names or indexes; separators: , ; | or spaces)."
+  say "Press ENTER to use the first column. Example: ID, BRANCH, EFF_DATE or 1,3"
   parse pull KEYIN
   KEYIN = strip(KEYIN)
 end
@@ -190,7 +199,7 @@ if in.0 = 0 then do
 end
 
 /* --- 3) Parse header & detect delimiter (with fallback) --- */
-hdr   = strip(in.1)
+hdr = strip(in.1)
 DELIM = detectDelim(hdr)
 
 cols. = ''
@@ -229,7 +238,8 @@ if DELIM = ' ' then do
 end
 
 /* --- 4) Keys (for UPDATE) --- */
-keys. = ''; keycnt = 0
+keys. = ''
+keycnt = 0
 if OP = "UPDATE" then do
   if KEYIN = '' then do
     keycnt = 1
@@ -239,20 +249,32 @@ if OP = "UPDATE" then do
     kraw = translate(KEYIN, ',', ';|')
     kraw = changestr('"', kraw, '')
     kraw = changestr("'", kraw, '')
-    do while pos('  ', kraw) > 0; kraw = changestr('  ', kraw, ' '); end
+    do while pos('  ', kraw) > 0
+      kraw = changestr('  ', kraw, ' ')
+    end
     kraw = translate(kraw, ',', ' ')
     kraw = strip(kraw, 'B', ',')
-    do while pos(',,', kraw) > 0; kraw = changestr(',,', kraw, ','); end
+    do while pos(',,', kraw) > 0
+      kraw = changestr(',,', kraw, ',')
+    end
 
     tmpk = kraw
     do forever
       parse var tmpk k ',' tmpk
-      k = strip(k); if k = '' then iterate
-      picked = ''
-      if datatype(k,'W') = 1 then do
-        idx = k + 0
-        if idx >= 1 & idx <= ncols then picked = cols.idx
+      k = strip(k)
+      if k = '' then do
+        if tmpk = '' then leave
+        iterate
       end
+
+      picked = ''
+      if datatype(k, 'W') = 1 then do
+        idx = k + 0
+        if idx >= 1 then do
+          if idx <= ncols then picked = cols.idx
+        end
+      end
+
       if picked = '' then do
         do i = 1 to ncols
           if translate(cols.i) = translate(k) then do
@@ -261,16 +283,21 @@ if OP = "UPDATE" then do
           end
         end
       end
+
       if picked <> '' then do
         dupe = 0
         do j = 1 to keycnt
-          if translate(keys.j) = translate(picked) then do; dupe = 1; leave; end
+          if translate(keys.j) = translate(picked) then do
+            dupe = 1
+            leave
+          end
         end
         if dupe = 0 then do
           keycnt = keycnt + 1
           keys.keycnt = picked
         end
       end
+
       if tmpk = '' then leave
     end
 
@@ -300,11 +327,126 @@ if OP = "UPDATE" then do
 end
 
 /* --- 5) Build SQL in out. (FB 80) --- */
-out. = ''; out.0 = 0
+out. = ''
+out.0 = 0
 
 do r = 2 to in.0
   line = strip(in.r)
   if line = '' then iterate
 
   vals. = ''
-  nval
+  nvals = splitLine(line, DELIM, 'vals.')
+
+  if nvals = 0 then do
+    alts = '|,;'
+    do ai = 1 to length(alts)
+      tryd = substr(alts, ai, 1)
+      vals. = ''
+      nvals = splitLine(line, tryd, 'vals.')
+      if nvals > 0 then leave
+    end
+  end
+
+  if nvals = 0 then do
+    say "ERROR: Could not split data line:"
+    say line
+    exit 30
+  end
+
+  if nvals < ncols then do
+    do i = nvals + 1 to ncols
+      vals.i = ''
+    end
+  end
+
+  if nvals > ncols then do
+    nvals = ncols
+  end
+
+  if OP = "UPDATE" then do
+    call app 'UPDATE ' || TABLENAME
+    call app 'SET'
+
+    /* emit non-key columns with commas (last one without) */
+    do i = 1 to ncols
+      iskey = 0
+      do j = 1 to keycnt
+        if i = kidx.j then do
+          iskey = 1
+          leave
+        end
+      end
+      if iskey = 1 then iterate
+
+      /* count remaining non-key columns from i..ncols */
+      leftcnt = 0
+      do t = i to ncols
+        isk = 0
+        do j = 1 to keycnt
+          if t = kidx.j then do
+            isk = 1
+            leave
+          end
+        end
+        if isk = 0 then do
+          leftcnt = leftcnt + 1
+        end
+      end
+      islast = 0
+      if leftcnt = 1 then islast = 1
+
+      lineSet = mkSetLine(cols.i, sqlQuote(vals.i), islast)
+      call app lineSet
+    end
+
+    call app 'WHERE'
+    do j = 1 to keycnt
+      wi = kidx.j
+      wfrag = '  ' || keys.j || ' = ' || sqlQuote(vals.wi)
+      if j < keycnt then do
+        wfrag = wfrag || ' AND'
+      end
+      call app wfrag
+    end
+    call app ';'
+    call app ''
+  end
+  else do  /* INSERT */
+    call app 'INSERT INTO ' || TABLENAME || ' ('
+    do i = 1 to ncols
+      lineCol = mkColLine(cols.i, i = ncols)
+      call app lineCol
+    end
+    call app ')'
+    call app 'VALUES ('
+    do i = 1 to ncols
+      lineVal = mkValLine(sqlQuote(vals.i), i = ncols)
+      call app lineVal
+    end
+    call app ');'
+    call app ''
+  end
+end
+
+/* --- 6) Write output dataset --- */
+"FREE FI(OUTFILE)"
+"ALLOC FI(OUTFILE) DA('"OUTDSN"') NEW CATALOG SPACE(5,5) CYL DSORG(PS) ",
+"RECFM(F B) LRECL(80) BLKSIZE(0)"
+if rc <> 0 then do
+  "ALLOC FI(OUTFILE) DA('"OUTDSN"') MOD REUSE"
+  if rc <> 0 then do
+    say "ERROR: Allocation of output dataset '"OUTDSN"' failed. RC="rc
+    exit 24
+  end
+end
+
+"EXECIO "out.0" DISKW OUTFILE (FINIS STEM out.)"
+if rc <> 0 then do
+  say "ERROR: Writing to output dataset failed. RC="rc
+  "FREE FI(OUTFILE)"
+  exit 28
+end
+"FREE FI(OUTFILE)"
+
+say "SUCCESS: " out.0 " records written to " OUTDSN "."
+exit 0
